@@ -4,11 +4,12 @@
 
 **Autonomous Email AI Agent**
 
-*Monitors → Classifies → Acts — with human-in-the-loop approval over WhatsApp*
+*Monitors → Classifies → Researches → Acts — with human-in-the-loop approval over WhatsApp*
 
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![LangGraph](https://img.shields.io/badge/LangGraph-Workflow-1C3C3C?logo=langchain)](https://langchain-ai.github.io/langgraph/)
 [![Groq](https://img.shields.io/badge/LLM-Groq%20%7C%20Llama%204-F55036)](https://groq.com)
+[![Tavily](https://img.shields.io/badge/Search-Tavily-0A66C2)](https://tavily.com)
 [![Celery](https://img.shields.io/badge/Queue-Celery%20%2B%20Redis-37814A?logo=redis)](https://docs.celeryq.dev)
 [![FastAPI](https://img.shields.io/badge/Webhook-FastAPI-009688?logo=fastapi)](https://fastapi.tiangolo.com)
 
@@ -22,9 +23,8 @@ MailMind is a daemon that sits behind your Gmail inbox and acts on every new ema
 
 | Email Type | MailMind Action |
 |---|---|
-| Interview invite | Checks calendar for conflicts → drafts availability reply |
-| Assessment / task | Creates a Trello card with deadline |
-| Reminder-type email | Sets a Google Calendar event |
+| Interview invite | Checks calendar → drafts reply → **researches company + role → writes prep plan into Calendar event**; if a conflict is detected the Calendar event is skipped and the reply mentions a suggested reschedule time |
+| Assessment / task | Creates a Trello card → **researches the topic → writes action plan into the card**; relative deadlines ("3 days", "in 2 days") are resolved to exact dates |
 | Low-confidence / ambiguous | Sends you a WhatsApp approval request |
 | Anything else | Ignores it |
 
@@ -50,15 +50,17 @@ flowchart TD
     H -->|confidence < 0.6\nREJECT| K([Ignored])
 
     I --> L{plan_type?}
-    L -->|DRAFT_AVAILABILITY_REPLY| M[AutoReplyNode\nSMTP]
-    L -->|UPDATE_TASK| N[TaskNode\nTrello card]
-    L -->|SET_REMINDER| O[RemainderNode\nGoogle Calendar]
+    L -->|SET_REMINDER\nUPDATE_TASK| M[AutoReplyNode\nSMTP]
     L -->|REQUEST_REVIEW| J
 
-    M & N & O -->|action_failed=True| P[FailureNode\nlog + WhatsApp escalation]
+    M -->|reply sent| N[ResearchNode\nTavily search + Groq plan]
+    N -->|SET_REMINDER| O[RemainderNode\nCalendar + prep plan]
+    N -->|UPDATE_TASK| P[TaskNode\nTrello + action plan]
 
-    J -->|APPROVE id| Q[WhatsApp Webhook\nFastAPI POST /whatsapp_hook]
-    Q -->|deserialize Redis state\nset AUTO_EXECUTE| I
+    M & O & P -->|action_failed=True| Q[FailureNode\nlog + WhatsApp escalation]
+
+    J -->|APPROVE id| R[WhatsApp Webhook\nFastAPI POST /whatsapp_hook]
+    R -->|deserialize Redis state\nset AUTO_EXECUTE| I
     J -->|REJECT id| K
 ```
 
@@ -86,7 +88,60 @@ sequenceDiagram
     F->>R: Load WorkflowState
     F->>W: Celery: whatsapp_processing_task
     W->>W: Set decision=AUTO_EXECUTE, re-enter at Planning
-    W->>G: Take action (reply / Trello / Calendar)
+    W->>W: AutoReply → Research → Calendar / Trello
+```
+
+---
+
+## Research & Planning Node
+
+After sending the auto-reply, **ResearchNode** runs Tavily web searches and feeds the results to the LLM to generate an actionable plan. The plan is written directly into the Calendar event description or Trello card, so it's waiting for you when you open it.
+
+| Email type | Tavily queries | Plan sections |
+|---|---|---|
+| **Interview** | `{company} {role} interview questions` · `{company} interview process culture` | Company Overview · Likely Topics · Preparation Steps · Useful Resources |
+| **Task / Assessment** | `{task} tutorial guide how to` · `{role} assessment best practices` | Task Overview · Recommended Approach · Key Resources · Time Breakdown |
+
+**Calendar event description (Interview):**
+```
+Source Email: ...
+From: ...
+Role: ...
+Company: ...
+Meeting Link: ...
+
+---
+## Preparation Plan
+## Company Overview
+Acme Corp is a Series B fintech startup focused on...
+
+## Likely Interview Topics
+- System design (distributed payments)
+- ...
+
+## Preparation Steps
+1. Review Stripe and Plaid API patterns
+...
+
+## Useful Resources
+- [Acme Engineering Blog](https://acme.com/blog)
+- ...
+```
+
+**Trello card description (Task):**
+```
+Source Email: ...
+Priority: high
+Description: Build a REST API for user auth...
+
+---
+## Action Plan
+## Task Overview
+Implement JWT-based auth with refresh token rotation...
+
+## Recommended Approach
+1. Set up project scaffolding
+...
 ```
 
 ---
@@ -111,7 +166,7 @@ flowchart LR
 
     subgraph PlanningAgent
         F --> I{LLM reasoning\nor rule fallback}
-        I -->|interview| J[DRAFT_AVAILABILITY_REPLY]
+        I -->|interview| J[SET_REMINDER]
         I -->|assessment| K[UPDATE_TASK]
         I -->|task/reminder| L[SET_REMINDER]
         I -->|ambiguous| M[REQUEST_REVIEW]
@@ -128,14 +183,12 @@ flowchart LR
 - PostgreSQL — database `email_agent_db`
 - Redis — `localhost:6379`
 - Google OAuth2 `token.json` with `calendar.events` scope (pre-generate via OAuth2 flow)
+- Tavily API key — free tier at [tavily.com](https://tavily.com)
 
 ### 1. Install dependencies
 
 ```bash
-pip install pydantic pydantic-settings langchain-groq langchain-core langgraph \
-            celery redis imapclient google-auth google-auth-oauthlib \
-            google-auth-httplib2 google-api-python-client \
-            twilio requests psycopg2-binary fastapi uvicorn
+pip install -r requirements.txt
 ```
 
 ### 2. Create the database table
@@ -158,6 +211,9 @@ IMAP_SERVER=imap.gmail.com
 
 # ── LLM (Groq) ─────────────────────────────────────
 GROQ_API_KEY=gsk_...
+
+# ── Web Search (Tavily) ─────────────────────────────
+TAVILY_API_KEY=tvly-...               # get free key at tavily.com
 
 # ── WhatsApp via Twilio ─────────────────────────────
 TWILIO_ACCOUNT_SID=AC...
@@ -212,14 +268,16 @@ uvicorn core.task_scheduler:app --host 0.0.0.0 --port 8000
 
 ```
 WorkflowState
-├── email          EmailDTO          raw parsed email
-├── classification ClassificationResult  category, priority, confidence
-├── extraction     ExtractionResult      meeting_at, deadline, company, role, suggested_reply
-├── decision       DecisionType          AUTO_EXECUTE | REVIEW | REJECT
-├── plan_type      PlanningEvent         which action to take
-├── event_type     str                   EMAIL | APPROVED
-├── action_failed  bool                  set by action nodes on error
-└── execution_result str                 human-readable outcome
+├── email_data       EmailDTO               raw parsed email
+├── classification   ClassificationResult   category, priority, confidence
+├── extracted_data   ExtractionResult       meeting_at, deadline, company, role, suggested_reply
+├── decision         DecisionType           AUTO_EXECUTE | REVIEW | REJECT
+├── plan_type        PlanningEvent          which action to take
+├── event_type       str                    EMAIL | APPROVED
+├── research_result  str | None             markdown action plan from ResearchNode
+├── calendar_conflict dict                  {has_conflict, alternate_time}
+├── action_failed    bool                   set by action nodes on error
+└── execution_result str                    human-readable outcome
 ```
 
 ### Node Reference
@@ -227,12 +285,13 @@ WorkflowState
 | Node | Module | Type | Responsibility |
 |---|---|---|---|
 | `ClassifierAgent` | `nodes/classifer_agent.py` | LLM (Groq) | Hybrid regex + LLM classification; lazy LLM init |
-| `ExtractionAgent` | `nodes/extraction_agent.py` | LLM (Groq) | Structured extraction + Google Calendar conflict check |
+| `ExtractionAgent` | `nodes/extraction_agent.py` | LLM (Groq) | Structured extraction from subject + body; Google Calendar conflict check; resolves relative day counts to exact ISO dates |
 | `DecisionMakerNode` | `nodes/decision_maker_node.py` | Rule-based | Confidence thresholds → decision enum |
 | `PlanningNode` | `nodes/planning_node.py` | LLM (Groq) | LLM plan selection with rule-based fallback |
 | `AutoReplyNode` | `nodes/auto_reply_node.py` | Stateless | SMTP reply via `tools/mail_tool.py` |
-| `TaskNode` | `nodes/task_node.py` | Stateless | Trello card creation; duplicate + 5/day guard |
-| `RemainderNode` | `nodes/remainder_node.py` | Stateless | Google Calendar event via `tools/calendar_tool.py` |
+| `ResearchNode` | `nodes/research_node.py` | LLM (Groq) + Tavily | Web search + LLM synthesis → markdown action plan |
+| `TaskNode` | `nodes/task_node.py` | Stateless | Trello card creation with research plan; due date set from extracted deadline (relative day counts pre-resolved); duplicate + 5/day guard |
+| `RemainderNode` | `nodes/remainder_node.py` | Stateless | Google Calendar event with prep plan; skips event creation if a calendar conflict was detected, avoiding double-booking |
 | `WhatsAppNode` | `nodes/whatsapp_node.py` | Stateless | Twilio message + Redis state serialization (24h TTL) |
 | `FailureNode` | `nodes/failure_node.py` | Stateless | Log failure + escalate via WhatsAppNode |
 
@@ -243,6 +302,7 @@ WorkflowState
 | Calendar | `tools/calendar_tool.py` | Google Calendar API — conflict check + event creation |
 | Trello | `tools/trello_tool.py` | Trello REST API — list cards + create card |
 | Mail | `tools/mail_tool.py` | Gmail SMTP — send reply |
+| Tavily | `tools/tavily_tool.py` | Tavily Search API — web research for planning |
 
 ### Enums
 
@@ -259,11 +319,10 @@ class DecisionType(str, Enum):
     REJECT       = "REJECT"
 
 class PlanningEvent(str, Enum):
-    DRAFT_AVAILABILITY_REPLY = "DRAFT_AVAILABILITY_REPLY"
-    UPDATE_TASK              = "UPDATE_TASK"
-    SET_REMINDER             = "SET_REMINDER"
-    REQUEST_REVIEW           = "REQUEST_REVIEW"
-    IGNORE                   = "IGNORE"
+    UPDATE_TASK    = "UPDATE_TASK"
+    SET_REMINDER   = "SET_REMINDER"
+    REQUEST_REVIEW = "REQUEST_REVIEW"
+    IGNORE         = "IGNORE"
 ```
 
 ---
@@ -344,6 +403,7 @@ graph LR
         C -->|OAuth2| H[Google Calendar]
         C & D -->|Twilio SDK| I[WhatsApp]
         C -->|Groq SDK| J[Groq LLM\nllama-4-scout]
+        C -->|REST| K[Tavily Search]
     end
 ```
 
@@ -375,6 +435,7 @@ mailmind/
 │   ├── decision_maker_node.py   DecisionMakerNode (rule-based)
 │   ├── planning_node.py         PlanningNode (LLM-backed)
 │   ├── auto_reply_node.py       AutoReplyNode
+│   ├── research_node.py         ResearchNode (Tavily search + Groq plan synthesis)
 │   ├── task_node.py             TaskNode
 │   ├── remainder_node.py        RemainderNode
 │   ├── whatsapp_node.py         WhatsAppNode
@@ -384,7 +445,8 @@ mailmind/
 ├── tools/
 │   ├── calendar_tool.py         Google Calendar API wrapper
 │   ├── trello_tool.py           Trello API wrapper
-│   └── mail_tool.py             Gmail SMTP wrapper
+│   ├── mail_tool.py             Gmail SMTP wrapper
+│   └── tavily_tool.py           Tavily Search API wrapper
 │
 ├── schema/
 │   ├── email_dto.py             EmailDTO
@@ -414,5 +476,8 @@ All inference uses **Groq** with `meta-llama/llama-4-scout-17b-16e-instruct`.
 | `ClassifierAgent` | Rule-based confidence < 0.7 | — (rule result used directly above threshold) |
 | `ExtractionAgent` | Always | None — required |
 | `PlanningAgent` | `AUTO_EXECUTE` decisions only | Rule-based map of category → plan_type |
+| `ResearchNode` | After AutoReply, before Task/Reminder | Skipped gracefully if Tavily key missing |
 
 LLM clients are instantiated lazily via a `@property` on each agent and reused across calls.
+
+> **Note:** `ResearchNode` uses `temperature=0.3` (slightly creative) while classification and extraction nodes use `temperature=0` (deterministic) for consistency.

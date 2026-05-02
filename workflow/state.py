@@ -26,6 +26,8 @@ class WorkflowState(TypedDict, total=False):
     task_url: str
     task_reason: str 
 
+    research_result: str | None
+
     action_failed: bool
     action_error: str
     failure_handled: bool

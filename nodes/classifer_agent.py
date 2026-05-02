@@ -5,7 +5,6 @@ from collections import defaultdict
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers.pydantic import PydanticOutputParser
-from openai import APIConnectionError, AuthenticationError, RateLimitError
 
 from config.settings import settings
 from schema.DataClassifer import DataClassifier
@@ -153,8 +152,6 @@ Email:
             if not match:
                 raise ValueError("No JSON found in LLM response")
             return parser.parse(match.group(0))
-        except (APIConnectionError, RateLimitError, AuthenticationError) as e:
-            logger.warning("LLM classification failed (%s): %s", type(e).__name__, e)
         except Exception:
             logger.exception("Unexpected error during LLM classification")
 

@@ -61,9 +61,7 @@ DATE RESOLUTION — resolve relative references to these exact dates:
 WORKFLOW:
 1. Extract all structured fields from the email.
 2. If meeting_at is non-null, call the check_conflict tool with that ISO datetime.
-3. If check_conflict returns has_conflict=true, update suggested_reply to mention the
-   conflict and include the alternate_time if provided.
-4. Return ONLY a valid JSON object — no markdown fences, no explanation.
+3. Return ONLY a valid JSON object — no markdown fences, no explanation.
 
 FIELDS TO EXTRACT:
 - meeting_at: YYYY-MM-DDTHH:MM:SS+HH:MM — requires BOTH date AND time, else null
@@ -85,6 +83,11 @@ STRICT RULES:
 
 def _build_task_system_prompt() -> str:
     d = _date_context()
+    today = datetime.now(timezone.utc).date()
+    relative_days = "\n".join(
+        f'  - "{i} day{"s" if i > 1 else ""}" / "in {i} day{"s" if i > 1 else ""}" / "within {i} day{"s" if i > 1 else ""}" → {(today + timedelta(days=i)).isoformat()}T23:59:00+00:00'
+        for i in [1, 2, 3, 4, 5, 6, 7, 10, 14, 21, 30]
+    )
     return f"""You are an email information extraction agent for TASK and ASSESSMENT emails.
 
 CURRENT DATE: {d['today']} (UTC)
@@ -95,12 +98,19 @@ DATE RESOLUTION — resolve relative references to these exact dates:
 - "end of today" / "by end of day" / "EOD" → {d['today_end']}
 - "next week" → {d['next_week']}
 
+RELATIVE DAY COUNTS — when the email states a number of days (e.g. "3 days", "2 day deadline", "in 5 days"):
+{relative_days}
+  - For any other N days not listed above: add N to {d['today']} to get the exact date, then set time to 23:59:00+00:00.
+
+IMPORTANT — if multiple sub-tasks have different day counts (e.g. "3 days for tests, 2 days for API"),
+use the LATEST (largest) deadline as the overall deadline field.
+
 Return ONLY a valid JSON object — no markdown fences, no explanation.
 
 FIELDS TO EXTRACT:
 - company: sender's company or organization, else null
 - role: task name, assessment title, or job role, else null
-- deadline: YYYY-MM-DDTHH:MM:SS+HH:MM — submission/completion deadline; if time missing use 23:59:00; no tz → +00:00; else null
+- deadline: YYYY-MM-DDTHH:MM:SS+HH:MM — submission/completion deadline resolved to an exact date; if relative (e.g. "3 days") compute from today; if time missing use 23:59:00; no tz → +00:00; else null
 - task_description: concise summary of what needs to be done (1-3 sentences), else null
 - estimated_time: human-readable time estimate if stated (e.g. "2 hours", "3 days"), else null
 - dependencies: blockers, prerequisites, or required resources if stated, else null
@@ -109,10 +119,24 @@ FIELDS TO EXTRACT:
   no greeting, no signature
 
 STRICT RULES:
-- Extract ONLY explicitly stated values — do NOT infer or guess
+- Relative day counts (e.g. "3 days", "within 2 days") MUST be resolved to exact ISO dates — do NOT leave them as null
+- Extract ONLY explicitly stated values — do NOT infer or guess anything else
 - If unsure → null
 - Times without timezone → assume UTC (+00:00)
 - Output must be a single JSON object starting with {{ and ending with }}"""
+
+
+def _format_readable(iso_str: str | None) -> str | None:
+    """Convert an ISO datetime string to e.g. 'Monday, 5 May 2026 at 10:00 AM UTC'."""
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_str).astimezone(timezone.utc)
+        hour_12 = dt.hour % 12 or 12
+        ampm = "AM" if dt.hour < 12 else "PM"
+        return f"{dt.strftime('%A')}, {dt.day} {dt.strftime('%B')} {dt.year} at {hour_12}:{dt.strftime('%M')} {ampm} UTC"
+    except Exception:
+        return iso_str
 
 
 def _to_utc(iso_str: str | None) -> str | None:
@@ -196,10 +220,13 @@ class ExtractionAgent:
             return {**state, "extracted_data": None}
 
         email = state["email_data"]
-        content = email.body_text or email.body_html or ""
-        if not content.strip():
+        body = email.body_text or email.body_html or ""
+        if not body.strip():
             logger.warning("ExtractionAgent: empty email body")
             return {**state, "extracted_data": None}
+
+        subject_line = f"Subject: {email.subject}\n\n" if email.subject else ""
+        content = f"{subject_line}Body:\n{body}"
 
         if classification.category == DataClassifier.INTERVIEW:
             return self._extract_interview(state, content)
@@ -231,18 +258,18 @@ class ExtractionAgent:
             logger.info("Calendar conflict result: %s", calendar_conflict)
 
             if calendar_conflict.get("has_conflict") and data.get("meeting_at"):
-                if "conflict" not in (data.get("suggested_reply") or "").lower():
-                    alt = calendar_conflict.get("alternate_time")
-                    base = (data.get("suggested_reply") or "Thanks for the mail.").rstrip(".")
-                    suffix = (
-                        f" However, I have a conflict at the proposed time."
-                        f" Could we reschedule to {alt} UTC instead?"
-                        if alt
-                        else " However, I have a conflict at the proposed time."
-                        " Could you suggest an alternate slot?"
-                    )
-                    data["suggested_reply"] = base + "." + suffix
-                    data["requires_response"] = True
+                alt = calendar_conflict.get("alternate_time")
+                base = (data.get("suggested_reply") or "Thanks for the mail.").rstrip(".")
+                readable_alt = _format_readable(alt)
+                suffix = (
+                    f" However, I have a conflict at the proposed time."
+                    f" Could we reschedule to {readable_alt} instead?"
+                    if readable_alt
+                    else " However, I have a conflict at the proposed time."
+                    " Could you suggest an alternate slot?"
+                )
+                data["suggested_reply"] = base + "." + suffix
+                data["requires_response"] = True
 
             extracted = InterviewExtractionResult(**data)
             logger.info("Interview extraction: %s", extracted)

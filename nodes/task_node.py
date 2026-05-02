@@ -64,6 +64,7 @@ class TaskNode:
             estimated_time = getattr(extracted, "estimated_time", None)
             dependencies = getattr(extracted, "dependencies", None)
 
+            research = state.get("research_result")
             desc = (
                 f"Source Email: {email.subject}\n"
                 f"From: {email.sender}\n"
@@ -74,6 +75,7 @@ class TaskNode:
                 + (f"Description: {task_description}\n" if task_description else "")
                 + (f"Estimated Time: {estimated_time}\n" if estimated_time else "")
                 + (f"Dependencies: {dependencies}\n" if dependencies else "")
+                + (f"\n---\n## Action Plan\n{research}\n" if research else "")
             )
             due = deadline or datetime.now(timezone.utc).replace(
                 hour=23, minute=59, second=59, microsecond=0

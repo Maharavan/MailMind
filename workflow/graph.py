@@ -9,6 +9,7 @@ from nodes.extraction_agent import ExtractionAgent
 from nodes.failure_node import FailureNode
 from nodes.planning_node import PlanningNode
 from nodes.remainder_node import RemainderTool
+from nodes.research_node import ResearchNode
 from nodes.task_node import TaskNode
 from nodes.whatsapp_node import WhatsAppNode
 from workflow.state import WorkflowState
@@ -38,6 +39,7 @@ class WorkflowGraph:
         classifier_agent = ClassifierAgent()
         extraction_agent = ExtractionAgent()
         planning_node = PlanningNode()
+        research_node = ResearchNode()
 
         build = StateGraph(WorkflowState)
 
@@ -46,6 +48,7 @@ class WorkflowGraph:
         build.add_node("DecisionMaker", DecisionMakerTool.make_decision)
         build.add_node("Planning", planning_node.plan)
         build.add_node("AutoReply", AutoReplyNode.execute)
+        build.add_node("Research", research_node.research)
         build.add_node("Task", TaskNode.execute)
         build.add_node("Reminder", RemainderTool.execute)
         build.add_node("Notification", WhatsAppNode.send_message)
@@ -86,6 +89,16 @@ class WorkflowGraph:
             _after_reply_router,
             {
                 "FAILED": "Failure",
+                "SET_REMINDER": "Research",
+                "UPDATE_TASK": "Research",
+            },
+        )
+
+        # Research always routes onward to the correct action node.
+        build.add_conditional_edges(
+            "Research",
+            lambda state: state["plan_type"],
+            {
                 "SET_REMINDER": "Reminder",
                 "UPDATE_TASK": "Task",
             },

@@ -24,6 +24,11 @@ class RemainderTool:
                 logger.warning("RemainderTool: no extracted_data")
                 return {**state, "action_failed": True, "action_error": "No extracted data", "execution_result": "FAILED"}
 
+            calendar_conflict = state.get("calendar_conflict") or {}
+            if calendar_conflict.get("has_conflict"):
+                logger.info("RemainderTool: skipping calendar event — conflict detected at proposed time")
+                return {**state, "action_failed": False, "execution_result": "SKIPPED_CONFLICT", "error": None}
+
             trigger_time_str = getattr(extracted, "meeting_at", None) or extracted.deadline
             if not trigger_time_str:
                 logger.warning("RemainderTool: no schedulable time found")
@@ -39,6 +44,7 @@ class RemainderTool:
             meeting_link = getattr(extracted, "meeting_link", None)
             event_end = trigger_time + timedelta(hours=1)
 
+            research = state.get("research_result")
             summary = (
                 f"Interview – {role} @ {company}"
                 if category == DataClassifier.INTERVIEW
@@ -50,6 +56,7 @@ class RemainderTool:
                 f"Role: {role}\n"
                 f"Company: {company}\n"
                 f"Meeting Link: {meeting_link or 'N/A'}\n"
+                + (f"\n---\n## Preparation Plan\n{research}\n" if research else "")
             )
 
             event_body = {

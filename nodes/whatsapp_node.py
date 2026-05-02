@@ -8,7 +8,7 @@ from twilio.rest import Client
 from config.settings import settings
 from schema.DataClassifer import DataClassifier
 from schema.email_dto import EmailDTO
-from schema.mail_extractor import InterviewExtractionResult, TaskExtractionResult
+from schema.mail_extractor import InterviewExtractionResult, TaskExtractionResult, ExtractionResult
 from workflow.state import WorkflowState
 
 logger = logging.getLogger(__name__)
